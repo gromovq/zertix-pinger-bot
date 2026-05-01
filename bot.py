@@ -26,17 +26,39 @@ class Target:
     port: int = 25565
 
 
+@dataclass(frozen=True)
 class Config:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    allowed_user_ids = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()}
-    allowed_chat_ids = {int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip()}
-    targets_file = os.getenv("TARGETS_FILE", "targets.txt")
-    db_path = os.getenv("DB_PATH", "stats.sqlite3")
-    poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
-    tz = timezone.utc if os.getenv("TIMEZONE", "UTC").upper() == "UTC" else timezone.utc
-    max_cidr_hosts = int(os.getenv("MAX_CIDR_HOSTS", "1024"))
-    ping_timeout = float(os.getenv("PING_TIMEOUT_SECONDS", "1.8"))
-    max_concurrency = int(os.getenv("MAX_CONCURRENCY", "200"))
+    token: str
+    allowed_user_ids: set[int]
+    allowed_chat_ids: set[int]
+    targets_file: str
+    db_path: str
+    poll_interval: int
+    tz: timezone
+    max_cidr_hosts: int
+    ping_timeout: float
+    max_concurrency: int
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "Environment variable TELEGRAM_BOT_TOKEN is required. "
+                "Set it in .env or export it in the environment."
+            )
+        return cls(
+            token=token,
+            allowed_user_ids={int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()},
+            allowed_chat_ids={int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip()},
+            targets_file=os.getenv("TARGETS_FILE", "targets.txt"),
+            db_path=os.getenv("DB_PATH", "stats.sqlite3"),
+            poll_interval=int(os.getenv("POLL_INTERVAL_SECONDS", "5")),
+            tz=timezone.utc if os.getenv("TIMEZONE", "UTC").upper() == "UTC" else timezone.utc,
+            max_cidr_hosts=int(os.getenv("MAX_CIDR_HOSTS", "1024")),
+            ping_timeout=float(os.getenv("PING_TIMEOUT_SECONDS", "1.8")),
+            max_concurrency=int(os.getenv("MAX_CONCURRENCY", "200")),
+        )
 
 
 class PingCollector:
@@ -233,7 +255,7 @@ class PingCollector:
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg = Config()
+    cfg = Config.from_env()
     collector = PingCollector(cfg)
     await collector.init_db()
     app = Application.builder().token(cfg.token).build()
