@@ -69,6 +69,7 @@ class PingCollector:
         self.running = True
         self._rate_limit: dict[int, deque[datetime]] = {}
         self._collector_task: asyncio.Task | None = None
+        self._last_online: dict[tuple[str, int], int] = {}
 
     def load_targets(self) -> list[Target]:
         parsed: set[Target] = set()
@@ -110,7 +111,21 @@ class PingCollector:
                 """
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts)")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS server_state (
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    last_online INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL,
+                    PRIMARY KEY(host, port)
+                )
+                """
+            )
             await db.commit()
+            cur = await db.execute("SELECT host, port, last_online FROM server_state")
+            rows = await cur.fetchall()
+            self._last_online = {(r[0], int(r[1])): int(r[2]) for r in rows}
 
     async def ping_target(self, target: Target, sem: asyncio.Semaphore) -> tuple[bool, int]:
         async with sem:
@@ -124,15 +139,33 @@ class PingCollector:
     async def collect_once(self):
         sem = asyncio.Semaphore(self.cfg.max_concurrency)
         results = await asyncio.gather(*(self.ping_target(t, sem) for t in self.targets), return_exceptions=False)
-        total = sum(online for ok, online in results if ok)
+        now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+        total = 0
         success = sum(1 for ok, _ in results if ok)
         failed = len(results) - success
-        ts = int(datetime.now(tz=timezone.utc).timestamp())
+        upserts: list[tuple[str, int, int, int]] = []
+        for target, (ok, online) in zip(self.targets, results, strict=False):
+            key = (target.host, target.port)
+            if ok:
+                self._last_online[key] = online
+                upserts.append((target.host, target.port, online, now_ts))
+            total += self._last_online.get(key, 0)
         async with aiosqlite.connect(self.cfg.db_path) as db:
             await db.execute(
                 "INSERT INTO samples(ts, total_online, success_count, failure_count) VALUES(?,?,?,?)",
-                (ts, total, success, failed),
+                (now_ts, total, success, failed),
             )
+            if upserts:
+                await db.executemany(
+                    """
+                    INSERT INTO server_state(host, port, last_online, updated_ts)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(host, port) DO UPDATE SET
+                        last_online=excluded.last_online,
+                        updated_ts=excluded.updated_ts
+                    """,
+                    upserts,
+                )
             await db.commit()
         logging.info("Saved sample: online=%s success=%s failed=%s", total, success, failed)
 
