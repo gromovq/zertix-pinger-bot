@@ -14,6 +14,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from mcstatus import JavaServer
+from telegram.error import NetworkError, TimedOut
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -57,7 +58,7 @@ class Config:
             tz=timezone.utc if os.getenv("TIMEZONE", "UTC").upper() == "UTC" else timezone.utc,
             max_cidr_hosts=int(os.getenv("MAX_CIDR_HOSTS", "1024")),
             ping_timeout=float(os.getenv("PING_TIMEOUT_SECONDS", "1.8")),
-            max_concurrency=int(os.getenv("MAX_CONCURRENCY", "200")),
+            max_concurrency=int(os.getenv("MAX_CONCURRENCY", "50")),
         )
 
 
@@ -67,6 +68,7 @@ class PingCollector:
         self.targets: list[Target] = []
         self.running = True
         self._rate_limit: dict[int, deque[datetime]] = {}
+        self._collector_task: asyncio.Task | None = None
 
     def load_targets(self) -> list[Target]:
         parsed: set[Target] = set()
@@ -145,6 +147,20 @@ class PingCollector:
                 logging.exception("Collect cycle failed")
             elapsed = (datetime.now(tz=timezone.utc) - started).total_seconds()
             await asyncio.sleep(max(0.1, self.cfg.poll_interval - elapsed))
+
+    async def start(self):
+        self.running = True
+        if self._collector_task is None or self._collector_task.done():
+            self._collector_task = asyncio.create_task(self.collector_loop(), name="collector_loop")
+
+    async def stop(self):
+        self.running = False
+        if self._collector_task and not self._collector_task.done():
+            self._collector_task.cancel()
+            try:
+                await self._collector_task
+            except asyncio.CancelledError:
+                pass
 
     def _auth_ok(self, update: Update) -> bool:
         user_id = update.effective_user.id if update.effective_user else None
@@ -261,11 +277,28 @@ async def main():
     app = Application.builder().token(cfg.token).build()
     app.add_handler(CommandHandler("now", collector.cmd_now))
     app.add_handler(CommandHandler("stats", collector.cmd_stats))
-    app.create_task(collector.collector_loop())
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    await asyncio.Event().wait()
+    async def _on_post_init(_: Application):
+        await collector.start()
+
+    async def _on_post_shutdown(_: Application):
+        await collector.stop()
+
+    app.post_init = _on_post_init
+    app.post_shutdown = _on_post_shutdown
+
+    while True:
+        try:
+            await app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                close_loop=False,
+                poll_interval=1.0,
+                timeout=30,
+                bootstrap_retries=5,
+            )
+            break
+        except (TimedOut, NetworkError) as err:
+            logging.warning("Telegram API unavailable (%s). Retry in 10 seconds...", err.__class__.__name__)
+            await asyncio.sleep(10)
 
 
 if __name__ == "__main__":
