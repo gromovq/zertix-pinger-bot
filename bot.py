@@ -274,31 +274,27 @@ async def main():
     cfg = Config.from_env()
     collector = PingCollector(cfg)
     await collector.init_db()
-    app = Application.builder().token(cfg.token).build()
-    app.add_handler(CommandHandler("now", collector.cmd_now))
-    app.add_handler(CommandHandler("stats", collector.cmd_stats))
-    async def _on_post_init(_: Application):
-        await collector.start()
-
-    async def _on_post_shutdown(_: Application):
-        await collector.stop()
-
-    app.post_init = _on_post_init
-    app.post_shutdown = _on_post_shutdown
-
     while True:
+        app = Application.builder().token(cfg.token).build()
+        app.add_handler(CommandHandler("now", collector.cmd_now))
+        app.add_handler(CommandHandler("stats", collector.cmd_stats))
         try:
-            await app.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                close_loop=False,
-                poll_interval=1.0,
-                timeout=30,
-                bootstrap_retries=5,
-            )
-            break
+            await app.initialize()
+            await app.start()
+            await collector.start()
+            await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, poll_interval=1.0, timeout=30)
+            logging.info("Bot started")
+            await asyncio.Event().wait()
         except (TimedOut, NetworkError) as err:
             logging.warning("Telegram API unavailable (%s). Retry in 10 seconds...", err.__class__.__name__)
             await asyncio.sleep(10)
+        finally:
+            await collector.stop()
+            if app.updater and app.updater.running:
+                await app.updater.stop()
+            if app.running:
+                await app.stop()
+            await app.shutdown()
 
 
 if __name__ == "__main__":
